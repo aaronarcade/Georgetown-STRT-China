@@ -1,4 +1,11 @@
+langchain
+torch
+accelerate
+sentence_transformers
+streamlit_chat
 streamlit
-openai
-llama-index
-nltk
+faiss-cpu
+tiktoken
+huggingface-hub
+pypdf
+llama-cpp-python

@@ -1,54 +1,136 @@
+# import streamlit as st
+# from llama_index import VectorStoreIndex, ServiceContext, Document
+# from llama_index.llms import OpenAI
+# import openai
+# from llama_index import SimpleDirectoryReader
+#
+# openai.api_key = st.secrets.openai_key
+#
+# "# WDI Historian Chatbot 💬👷‍♀️✨"
+#
+# """
+# This app is an example of an openai-powered chatbot using
+# llama index.
+#
+# View the full app code
+# [here](https://github.com/aaronarcade/streamlit-LLM-hackathon).
+# Disney information sources: [D23 - Disney Archives](https://d23.com/walt-disney-archives/).
+# """
+#
+# if "messages" not in st.session_state.keys(): # Initialize the chat message history
+#     st.session_state.messages = [
+#         {"role": "assistant", "content": "Ask me a question about WED or Imagineering!"},
+#         {"role": "assistant", "content": "Examples: What is WDI? Who is John Hench? What are Mickey's Ten Commandments? - or ask me what I can talk about!"}
+#     ]
 import streamlit as st
-from llama_index import VectorStoreIndex, ServiceContext, Document
-from llama_index.llms import OpenAI
-import openai
-from llama_index import SimpleDirectoryReader
+from streamlit_chat import message
+from langchain.chains import ConversationalRetrievalChain
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.llms import LlamaCpp
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.vectorstores import FAISS
+from langchain.memory import ConversationBufferMemory
+from langchain.document_loaders import PyPDFLoader
+import os
+import tempfile
 
-openai.api_key = st.secrets.openai_key
 
-"# WDI Historian Chatbot 💬👷‍♀️✨"
+def initialize_session_state():
+    if 'history' not in st.session_state:
+        st.session_state['history'] = []
 
-"""
-This app is an example of an openai-powered chatbot using
-llama index.
+    if 'generated' not in st.session_state:
+        st.session_state['generated'] = ["Hello! Ask me anything!"]
 
-View the full app code
-[here](https://github.com/aaronarcade/streamlit-LLM-hackathon).
-Disney information sources: [D23 - Disney Archives](https://d23.com/walt-disney-archives/).
-"""
+    if 'past' not in st.session_state:
+        st.session_state['past'] = ["Hey!"]
 
-if "messages" not in st.session_state.keys(): # Initialize the chat message history
-    st.session_state.messages = [
-        {"role": "assistant", "content": "Ask me a question about WED or Imagineering!"},
-        {"role": "assistant", "content": "Examples: What is WDI? Who is John Hench? What are Mickey's Ten Commandments? - or ask me what I can talk about!"}
-    ]
+def conversation_chat(query, chain, history):
+    result = chain({"question": query, "chat_history": history})
+    history.append((query, result["answer"]))
+    return result["answer"]
 
-@st.cache_resource(show_spinner=False)
-def load_data():
-    with st.spinner(text="Loading publicly available WDI docs – please excuse our pixie dust, this will only take a moment."):
-        reader = SimpleDirectoryReader(input_dir="data", recursive=True)
-        docs = reader.load_data()
-        service_context = ServiceContext.from_defaults(llm=OpenAI(model="gpt-3.5-turbo", temperature=0.5, system_prompt="You are an expert on Walt Disney Imagineering and WED Enterprises and your job is to answer questions about WDI and WED history. Assume that all questions are related to the Disney and Imagineering. Keep your answers technical or based on historic facts – do not hallucinate information. Give 2-3 sentences context with each response. You may discuss Aaron Brown."))
-        index = VectorStoreIndex.from_documents(docs, service_context=service_context)
-        return index
+def display_chat_history(chain):
+    reply_container = st.container()
+    container = st.container()
 
-index = load_data()
+    with container:
+        with st.form(key='my_form', clear_on_submit=True):
+            user_input = st.text_input("Question:", placeholder="Ask about your PDF", key='input')
+            submit_button = st.form_submit_button(label='Send')
 
-chat_engine = index.as_chat_engine(chat_mode="condense_question", verbose=True)
+        if submit_button and user_input:
+            with st.spinner('Generating response...'):
+                output = conversation_chat(user_input, chain, st.session_state['history'])
 
-if prompt := st.chat_input("Your question"): # Prompt for user input and save to chat history
-    st.session_state.messages.append({"role": "user", "content": prompt})
+            st.session_state['past'].append(user_input)
+            st.session_state['generated'].append(output)
 
-for message in st.session_state.messages: # Display the prior chat messages
-    with st.chat_message(message["role"]):
-        st.write(message["content"])
+    if st.session_state['generated']:
+        with reply_container:
+            for i in range(len(st.session_state['generated'])):
+                message(st.session_state["past"][i], is_user=True, key=str(i) + '_user', avatar_style="thumbs")
+                message(st.session_state["generated"][i], key=str(i), avatar_style="fun-emoji")
 
-# If last message is not from assistant, generate a new response
-if st.session_state.messages[-1]["role"] != "assistant":
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            response = chat_engine.chat(prompt)
-            st.write(response.response)
-            message = {"role": "assistant", "content": response.response}
-            st.session_state.messages.append(message) # Add response to message history
+def create_conversational_chain(vector_store):
+    # Create llm
+    llm = LlamaCpp(
+    streaming = True,
+    model_path="mistral-7b-instruct-v0.1.Q4_K_M.gguf",
+    temperature=0.75,
+    top_p=1,
+    verbose=True,
+    n_ctx=4096
+)
+
+    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+
+    chain = ConversationalRetrievalChain.from_llm(llm=llm, chain_type='stuff',
+                                                 retriever=vector_store.as_retriever(search_kwargs={"k": 2}),
+                                                 memory=memory)
+    return chain
+
+def main():
+    # Initialize session state
+    initialize_session_state()
+    st.title("Multi-PDF ChatBot using Mistral-7B-Instruct :books:")
+    # Initialize Streamlit
+    st.sidebar.title("Document Processing")
+    uploaded_files = st.sidebar.file_uploader("Upload files", accept_multiple_files=True)
+
+
+    if uploaded_files:
+        text = []
+        for file in uploaded_files:
+            file_extension = os.path.splitext(file.name)[1]
+            with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+                temp_file.write(file.read())
+                temp_file_path = temp_file.name
+
+            loader = None
+            if file_extension == ".pdf":
+                loader = PyPDFLoader(temp_file_path)
+
+            if loader:
+                text.extend(loader.load())
+                os.remove(temp_file_path)
+
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=10000, chunk_overlap=20)
+        text_chunks = text_splitter.split_documents(text)
+
+        # Create embeddings
+        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2",
+                                           model_kwargs={'device': 'cpu'})
+
+        # Create vector store
+        vector_store = FAISS.from_documents(text_chunks, embedding=embeddings)
+
+        # Create the chain object
+        chain = create_conversational_chain(vector_store)
+
+
+        display_chat_history(chain)
+
+if __name__ == "__main__":
+    main()
 
